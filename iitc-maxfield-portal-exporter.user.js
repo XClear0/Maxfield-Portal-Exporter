@@ -4,6 +4,7 @@
 // @name            IITC plugin: Maxfield Portal Exporter
 // @category        Information
 // @version         2.0.0
+// @license         MIT
 // @namespace       https://github.com/IITC-CE/ingress-intel-total-conversion
 // @description     Export Draw Tools vertices/areas or Bookmarks to Maxfield, with C.O.R.E. inventory key counts.
 // @include         https://intel.ingress.com/*

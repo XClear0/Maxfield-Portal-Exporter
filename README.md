@@ -1,6 +1,6 @@
 # Maxfield Portal Exporter
 
-一个运行在 [IITC-CE](https://iitc.app/) 中的用户脚本，用于把 Draw Tools 图形或 Portal Bookmarks 转换为 [Ingress Maxfield](https://github.com/tvwenger/maxfield) 可直接读取的 Portal 列表。
+一个运行在 [IITC-CE](https://iitc.app/) 中的用户脚本，用于把 Draw Tools 图形或 Portal Bookmarks 转换为 [Ingress Maxfield](https://github.com/XClear0/maxfield) 可直接读取的 Portal 列表。
 
 脚本可以读取 C.O.R.E. Inventory 中的真实 Key 数量，并将普通背包与 Capsule / Key Locker 中属于同一 Portal 的 Key 合并统计。导出结果可以直接复制，或下载为 UTF-8 编码的 `maxfield-portals.txt`。
 
@@ -212,7 +212,7 @@ docker run --rm `
   --output_csv
 ```
 
-具体安装方式和参数以 [Maxfield 项目文档](https://github.com/tvwenger/maxfield) 为准。
+具体安装方式和参数以 [Maxfield 项目文档](https://github.com/XClear0/maxfield) 为准。
 
 ## 常见问题
 
@@ -285,8 +285,12 @@ node --check iitc-maxfield-portal-exporter.user.js
 
 当前脚本版本：`2.0.0`。
 
+## 开源许可
+
+本项目采用 [MIT License](./LICENSE) 开源。使用、复制、修改或分发本脚本时，须保留版权与许可声明。
+
 ## 相关项目
 
 - [IITC-CE](https://github.com/IITC-CE/ingress-intel-total-conversion)
 - [IITC-CE Community Plugins](https://github.com/IITC-CE/Community-plugins)
-- [Ingress Maxfield](https://github.com/tvwenger/maxfield)
+- [Ingress Maxfield](https://github.com/XClear0/maxfield)
