@@ -3,10 +3,10 @@
 // @id              iitc-maxfield-portal-exporter@openai-codex
 // @name            IITC plugin: Maxfield Portal Exporter
 // @category        Information
-// @version         2.1.1
+// @version         2.2.0
 // @license         MIT
 // @namespace       https://github.com/IITC-CE/ingress-intel-total-conversion
-// @description     Export Draw Tools/Bookmarks portals, retained Intel links, and C.O.R.E. key counts to Maxfield.
+// @description     Export Draw Tools/Bookmarks portals, loaded Intel links, and C.O.R.E. key counts to Maxfield.
 // @include         https://intel.ingress.com/*
 // @match           https://intel.ingress.com/*
 // @grant           none
@@ -25,7 +25,7 @@
 
     self.id = 'maxfield-portal-exporter';
     self.title = 'Maxfield Portal Exporter';
-    self.version = '2.1.1';
+    self.version = '2.2.0';
     self.CACHE_KEY = 'plugin-maxfield-portal-exporter-inventory-v2';
     self.SETTINGS_KEY = 'plugin-maxfield-portal-exporter-settings-v2';
     self.CACHE_TTL_MS = 10 * 60 * 1000;
@@ -73,8 +73,7 @@
         matchDistance: self.DEFAULT_MATCH_DISTANCE,
         bookmarkFolder: '',
         includeKeys: true,
-        includeExistingLinks: false,
-        linkDirection: 'intel'
+        includeExistingLinks: false
       };
       try {
         var stored = JSON.parse(localStorage.getItem(self.SETTINGS_KEY) || '{}');
@@ -84,7 +83,6 @@
           if (typeof stored.bookmarkFolder === 'string') defaults.bookmarkFolder = stored.bookmarkFolder;
           if (typeof stored.includeKeys === 'boolean') defaults.includeKeys = stored.includeKeys;
           if (typeof stored.includeExistingLinks === 'boolean') defaults.includeExistingLinks = stored.includeExistingLinks;
-          if (['intel', 'draw'].indexOf(stored.linkDirection) !== -1) defaults.linkDirection = stored.linkDirection;
         }
       } catch (e) {
         console.warn(self.title + ': could not load settings', e);
@@ -100,14 +98,12 @@
       var folder = root.querySelector('#mpe-bookmark-folder');
       var includeKeys = root.querySelector('#mpe-include-keys');
       var includeExistingLinks = root.querySelector('#mpe-include-existing-links');
-      var linkDirection = root.querySelector('#mpe-link-direction');
       var data = {
         mode: mode ? mode.value : 'vertices',
         matchDistance: distance && Number(distance.value) > 0 ? Number(distance.value) : self.DEFAULT_MATCH_DISTANCE,
         bookmarkFolder: folder ? folder.value : '',
         includeKeys: includeKeys ? includeKeys.checked : true,
-        includeExistingLinks: includeExistingLinks ? includeExistingLinks.checked : false,
-        linkDirection: linkDirection ? linkDirection.value : 'intel'
+        includeExistingLinks: includeExistingLinks ? includeExistingLinks.checked : false
       };
       try {
         localStorage.setItem(self.SETTINGS_KEY, JSON.stringify(data));
@@ -528,179 +524,48 @@
       return unique;
     };
 
-    self.normalisePolylinePaths = function (latlngs) {
-      if (!Array.isArray(latlngs) || !latlngs.length) return [];
-      if (self.isLatLng(latlngs[0])) return [latlngs];
-      var paths = [];
-      latlngs.forEach(function (part) {
-        paths = paths.concat(self.normalisePolylinePaths(part));
-      });
-      return paths;
-    };
-
-    self.getDrawLinkSegments = function (layers) {
-      var segments = [];
-      layers.forEach(function (layer, layerIndex) {
-        // Filled polygons select an area; their borders are not assumed to be
-        // retained Intel links. Circles and markers are not links either.
-        if (
-          self.isCircleLayer(layer) ||
-          self.isPolygonLayer(layer) ||
-          self.isMarkerLayer(layer) ||
-          typeof layer.getLatLngs !== 'function'
-        ) {
-          return;
-        }
-
-        self.normalisePolylinePaths(layer.getLatLngs()).forEach(function (path, pathIndex) {
-          for (var i = 0; i < path.length - 1; i += 1) {
-            segments.push({
-              layerIndex: layerIndex,
-              pathIndex: pathIndex,
-              segmentIndex: i,
-              firstPoint: window.L.latLng(Number(path[i].lat), Number(path[i].lng)),
-              secondPoint: window.L.latLng(Number(path[i + 1].lat), Number(path[i + 1].lng))
-            });
-          }
-        });
-      });
-      return segments;
-    };
-
-    self.matchPointToPortal = function (point, candidates, maxDistance) {
-      var best = null;
-      var bestDistance = Infinity;
-      candidates.forEach(function (portal) {
-        var distance = point.distanceTo(window.L.latLng(portal.lat, portal.lng));
-        if (distance < bestDistance) {
-          best = portal;
-          bestDistance = distance;
-        }
-      });
-      if (!best || bestDistance > maxDistance) {
-        return {
-          portal: null,
-          nearestPortal: best,
-          distance: Number.isFinite(bestDistance) ? bestDistance : null
-        };
-      }
-      return { portal: best, nearestPortal: best, distance: bestDistance };
-    };
-
     self.linkPairKey = function (first, second) {
       return [String(first), String(second)].sort().join('|');
     };
 
-    self.getIntelLinkIndex = function () {
-      var index = {};
+    self.collectExistingIntelLinks = function (portals) {
+      var portalsByGuid = {};
+      portals.forEach(function (portal) {
+        if (portal.guid) portalsByGuid[portal.guid] = portal;
+      });
+
       var playerTeamId = null;
       if (window.PLAYER && typeof window.teamStringToId === 'function') {
         playerTeamId = window.teamStringToId(window.PLAYER.team);
       }
+
+      var links = [];
+      var seen = {};
+      var loadedCount = 0;
+      var selectedPairCount = 0;
+      var opposingCount = 0;
+      var duplicateCount = 0;
+
       Object.keys(window.links || {}).forEach(function (linkGuid) {
         var link = window.links[linkGuid];
         var data = link && link.options ? link.options.data : null;
         if (!data || !data.oGuid || !data.dGuid) return;
-        var linkTeamId = typeof window.teamStringToId === 'function' ? window.teamStringToId(data.team) : null;
-        index[self.linkPairKey(data.oGuid, data.dGuid)] = {
-          linkGuid: linkGuid,
-          originGuid: data.oGuid,
-          destinationGuid: data.dGuid,
-          team: data.team,
-          isFriendly: playerTeamId === null || linkTeamId === null ? null : playerTeamId === linkTeamId
-        };
-      });
-      return index;
-    };
+        loadedCount += 1;
 
-    self.collectExistingLinks = function (layers, candidates, maxDistance, directionMode) {
-      var segments = self.getDrawLinkSegments(layers);
-      var intelLinks = self.getIntelLinkIndex();
-      var links = [];
-      var unresolved = [];
-      var seen = {};
-      var duplicateCount = 0;
+        var originPortal = portalsByGuid[data.oGuid];
+        var destinationPortal = portalsByGuid[data.dGuid];
+        if (!originPortal || !destinationPortal) return;
+        selectedPairCount += 1;
 
-      segments.forEach(function (segment) {
-        var firstMatch = self.matchPointToPortal(segment.firstPoint, candidates, maxDistance);
-        var secondMatch = self.matchPointToPortal(segment.secondPoint, candidates, maxDistance);
-        var location = '图层 ' + (segment.layerIndex + 1) + '，线段 ' + (segment.segmentIndex + 1);
-
-        if (!firstMatch.portal || !secondMatch.portal) {
-          var missing = [];
-          if (!firstMatch.portal) missing.push('第一个端点');
-          if (!secondMatch.portal) missing.push('第二个端点');
-          unresolved.push({
-            location: location,
-            reason: missing.join('、') + '未在 ' + maxDistance + ' 米内匹配到 Portal',
-            firstPoint: segment.firstPoint,
-            secondPoint: segment.secondPoint
-          });
+        var linkTeamId = typeof window.teamStringToId === 'function'
+          ? window.teamStringToId(data.team)
+          : null;
+        if (playerTeamId !== null && linkTeamId !== null && playerTeamId !== linkTeamId) {
+          opposingCount += 1;
           return;
         }
 
-        var firstPortal = firstMatch.portal;
-        var secondPortal = secondMatch.portal;
-        var firstIdentity = self.portalIdentity(firstPortal);
-        var secondIdentity = self.portalIdentity(secondPortal);
-        if (firstIdentity === secondIdentity) {
-          unresolved.push({
-            location: location,
-            reason: '两个端点匹配到了同一个 Portal',
-            firstPoint: segment.firstPoint,
-            secondPoint: segment.secondPoint
-          });
-          return;
-        }
-
-        var originPortal = firstPortal;
-        var destinationPortal = secondPortal;
-        var directionSource = 'draw';
-        var intelLink = null;
-
-        if (directionMode === 'intel') {
-          if (!firstPortal.guid || !secondPortal.guid) {
-            unresolved.push({
-              location: location,
-              reason: '端点缺少 Portal GUID，无法验证 Intel Link 方向',
-              firstPoint: segment.firstPoint,
-              secondPoint: segment.secondPoint
-            });
-            return;
-          }
-          intelLink = intelLinks[self.linkPairKey(firstPortal.guid, secondPortal.guid)];
-          if (!intelLink) {
-            unresolved.push({
-              location: location,
-              reason: '当前已加载的 Intel Link 中没有这对端点',
-              firstPoint: segment.firstPoint,
-              secondPoint: segment.secondPoint
-            });
-            return;
-          }
-          if (intelLink.isFriendly === false) {
-            unresolved.push({
-              location: location,
-              reason: '对应 Intel Link 不属于当前玩家阵营，不能作为保留的己方 EXISTING_LINK',
-              firstPoint: segment.firstPoint,
-              secondPoint: segment.secondPoint
-            });
-            return;
-          }
-          if (firstPortal.guid === intelLink.originGuid) {
-            originPortal = firstPortal;
-            destinationPortal = secondPortal;
-          } else {
-            originPortal = secondPortal;
-            destinationPortal = firstPortal;
-          }
-          directionSource = 'intel';
-        }
-
-        var identity = self.linkPairKey(
-          self.portalIdentity(originPortal),
-          self.portalIdentity(destinationPortal)
-        );
+        var identity = self.linkPairKey(data.oGuid, data.dGuid);
         if (seen[identity]) {
           duplicateCount += 1;
           return;
@@ -709,17 +574,17 @@
         links.push({
           originPortal: originPortal,
           destinationPortal: destinationPortal,
-          directionSource: directionSource,
-          intelLinkGuid: intelLink ? intelLink.linkGuid : '',
-          team: intelLink ? intelLink.team : undefined,
-          location: location
+          directionSource: 'intel',
+          intelLinkGuid: linkGuid,
+          team: data.team
         });
       });
 
       return {
         links: links,
-        unresolved: unresolved,
-        segmentCount: segments.length,
+        loadedCount: loadedCount,
+        selectedPairCount: selectedPairCount,
+        opposingCount: opposingCount,
         duplicateCount: duplicateCount
       };
     };
@@ -800,75 +665,64 @@
       return { portals: self.mergePortals([matched]), unmatched: unmatched };
     };
 
-    self.collectSelection = function (mode, maxDistance, folderId, includeExistingLinks, linkDirection) {
-      if (mode === 'bookmarks') {
-        if (!folderId) throw new Error('请选择一个 Bookmarks 文件夹');
-        return {
-          portals: self.mergePortals([self.getBookmarkPortals(folderId)]),
-          unmatched: [],
-          vertexCount: 0,
-          areaCount: 0,
-          existingLinks: [],
-          existingLinkSegments: 0,
-          unresolvedLinks: [],
-          duplicateExistingLinks: 0,
-          notes: []
-        };
-      }
-
-      var layers = self.getDrawLayers();
-      if (!layers.length) throw new Error('Draw Tools 中没有图形');
-      var candidates = self.getPortalCandidates();
+    self.collectSelection = function (mode, maxDistance, folderId, includeExistingLinks) {
       var result = {
         portals: [],
         unmatched: [],
         vertexCount: 0,
         areaCount: 0,
         existingLinks: [],
-        existingLinkSegments: 0,
-        unresolvedLinks: [],
+        includeExistingLinks: includeExistingLinks,
+        loadedIntelLinks: 0,
+        selectedIntelLinkPairs: 0,
+        opposingExistingLinks: 0,
         duplicateExistingLinks: 0,
         notes: []
       };
 
-      if (mode === 'vertices' || mode === 'combined') {
-        var vertices = self.getDrawVertices(layers);
-        var vertexMatches = self.matchVertices(vertices, candidates, maxDistance);
-        result.vertexCount = vertices.length;
-        result.portals = result.portals.concat(vertexMatches.portals);
-        result.unmatched = vertexMatches.unmatched;
-        if (!vertices.length) result.notes.push('没有找到可匹配的线段、图形顶点或 Marker。圆形只参与区域导出。');
-      }
+      if (mode === 'bookmarks') {
+        if (!folderId) throw new Error('请选择一个 Bookmarks 文件夹');
+        result.portals = self.mergePortals([self.getBookmarkPortals(folderId)]);
+      } else {
+        var layers = self.getDrawLayers();
+        if (!layers.length) throw new Error('Draw Tools 中没有图形');
+        var candidates = self.getPortalCandidates();
 
-      if (mode === 'areas' || mode === 'combined') {
-        var areas = self.getAreaLayers(layers);
-        result.areaCount = areas.length;
-        var inside = candidates.filter(function (portal) {
-          return areas.some(function (layer) { return self.portalInsideLayer(portal, layer); });
-        });
-        result.portals = result.portals.concat(inside);
-        result.notes.push('区域结果仅包含 IITC 当前已加载的 Portal 与 Bookmarks；请先移动/缩放地图以加载完整数据。');
-        if (!areas.length) result.notes.push('Draw Tools 中没有多边形、矩形或圆形区域。');
-      }
-
-      if (includeExistingLinks) {
-        var existing = self.collectExistingLinks(layers, candidates, maxDistance, linkDirection);
-        result.existingLinks = existing.links;
-        result.existingLinkSegments = existing.segmentCount;
-        result.unresolvedLinks = existing.unresolved;
-        result.duplicateExistingLinks = existing.duplicateCount;
-        existing.links.forEach(function (link) {
-          result.portals.push(link.originPortal, link.destinationPortal);
-        });
-        if (!existing.segmentCount) {
-          result.notes.push('没有找到可作为 EXISTING_LINK 的 Draw Tools Polyline；Polygon 边界不会自动作为现有 Link。');
+        if (mode === 'vertices' || mode === 'combined') {
+          var vertices = self.getDrawVertices(layers);
+          var vertexMatches = self.matchVertices(vertices, candidates, maxDistance);
+          result.vertexCount = vertices.length;
+          result.portals = result.portals.concat(vertexMatches.portals);
+          result.unmatched = vertexMatches.unmatched;
+          if (!vertices.length) result.notes.push('没有找到可匹配的线段、图形顶点或 Marker。圆形只参与区域导出。');
         }
-        if (linkDirection === 'draw' && existing.links.length) {
-          result.notes.push('EXISTING_LINK 方向采用 Draw Tools 绘制顺序：每段第一个点 → 第二个点，请确认它与 Intel 实际方向一致。');
+
+        if (mode === 'areas' || mode === 'combined') {
+          var areas = self.getAreaLayers(layers);
+          result.areaCount = areas.length;
+          var inside = candidates.filter(function (portal) {
+            return areas.some(function (layer) { return self.portalInsideLayer(portal, layer); });
+          });
+          result.portals = result.portals.concat(inside);
+          result.notes.push('区域结果仅包含 IITC 当前已加载的 Portal 与 Bookmarks；请先移动/缩放地图以加载完整数据。');
+          if (!areas.length) result.notes.push('Draw Tools 中没有多边形、矩形或圆形区域。');
         }
       }
 
       result.portals = self.mergePortals([result.portals]);
+
+      if (includeExistingLinks) {
+        var existing = self.collectExistingIntelLinks(result.portals);
+        result.existingLinks = existing.links;
+        result.loadedIntelLinks = existing.loadedCount;
+        result.selectedIntelLinkPairs = existing.selectedPairCount;
+        result.opposingExistingLinks = existing.opposingCount;
+        result.duplicateExistingLinks = existing.duplicateCount;
+        if (!existing.links.length) {
+          result.notes.push('所选 Portal 之间没有找到当前已加载的己方 Intel Link；Draw Tools 绘制线不会作为 EXISTING_LINK 导出。');
+        }
+      }
+
       return result;
     };
 
@@ -940,8 +794,7 @@
         maxDistance: Number.isFinite(distance) && distance > 0 ? distance : self.DEFAULT_MATCH_DISTANCE,
         folderId: root.querySelector('#mpe-bookmark-folder').value,
         includeKeys: root.querySelector('#mpe-include-keys').checked,
-        includeExistingLinks: root.querySelector('#mpe-include-existing-links').checked,
-        linkDirection: root.querySelector('#mpe-link-direction').value
+        includeExistingLinks: root.querySelector('#mpe-include-existing-links').checked
       };
     };
 
@@ -952,9 +805,10 @@
       parts.push('<strong>已生成 ' + selection.portals.length + ' 个 Portal。</strong>');
       if (selection.vertexCount) parts.push('Draw Tools 顶点：' + selection.vertexCount + '。');
       if (selection.areaCount) parts.push('区域图形：' + selection.areaCount + '。');
-      if (selection.existingLinkSegments) {
-        parts.push('Draw Tools Link 线段：' + selection.existingLinkSegments + '；已导出 EXISTING_LINK：' + selection.existingLinks.length + '。');
+      if (selection.includeExistingLinks) {
+        parts.push('Intel 已加载 Link：' + selection.loadedIntelLinks + '；所选 Portal 间 Intel Link：' + selection.selectedIntelLinkPairs + '；已导出己方 EXISTING_LINK：' + selection.existingLinks.length + '。');
       }
+      if (selection.opposingExistingLinks) parts.push('所选 Portal 间敌方 Link 已忽略：' + selection.opposingExistingLinks + '。');
       if (selection.duplicateExistingLinks) parts.push('重复 Link 已忽略：' + selection.duplicateExistingLinks + '。');
       if (renamed) parts.push('重名处理：' + renamed + ' 个名称已添加序号。');
 
@@ -966,16 +820,6 @@
               ? '；最近：' + self.escapeHtml(item.nearestTitle) + '（' + Math.round(item.nearestDistance) + ' m）'
               : '；附近没有可用 Portal';
             return '<li>' + self.escapeHtml(self.formatCoordinate(item.lat) + ',' + self.formatCoordinate(item.lng)) + nearest + '</li>';
-          }).join('') + '</ol></details>');
-      }
-
-      if (selection.unresolvedLinks.length) {
-        parts.push('<div class="mpe-warn"><strong>未导出的 EXISTING_LINK：' + selection.unresolvedLinks.length + '</strong></div>');
-        parts.push('<details><summary>查看未导出的 Link</summary><ol class="mpe-unmatched">' +
-          selection.unresolvedLinks.map(function (item) {
-            var coordinates = self.formatCoordinate(item.firstPoint.lat) + ',' + self.formatCoordinate(item.firstPoint.lng) +
-              ' → ' + self.formatCoordinate(item.secondPoint.lat) + ',' + self.formatCoordinate(item.secondPoint.lng);
-            return '<li>' + self.escapeHtml(item.location + '：' + item.reason + '（' + coordinates + '）') + '</li>';
           }).join('') + '</ol></details>');
       }
 
@@ -992,14 +836,12 @@
           values.mode,
           values.maxDistance,
           values.folderId,
-          values.includeExistingLinks && values.mode !== 'bookmarks',
-          values.linkDirection
+          values.includeExistingLinks
         );
-        var issueCount = selection.unmatched.length + selection.unresolvedLinks.length;
+        var issueCount = selection.unmatched.length;
         if (promptForUnmatched && issueCount) {
           var issueText = [];
           if (selection.unmatched.length) issueText.push(selection.unmatched.length + ' 个 Draw Tools 顶点未匹配');
-          if (selection.unresolvedLinks.length) issueText.push(selection.unresolvedLinks.length + ' 条 EXISTING_LINK 未导出');
           var proceed = window.confirm(
             '存在以下问题：' + issueText.join('；') + '。\n\n是否继续生成其余已确认的数据？'
           );
@@ -1048,9 +890,9 @@
     self.confirmUnmatched = function () {
       if (!self.lastResult || self.lastResult.issuesAcknowledged) return true;
       var selection = self.lastResult.selection;
-      var count = selection.unmatched.length + selection.unresolvedLinks.length;
+      var count = selection.unmatched.length;
       if (!count) return true;
-      var proceed = window.confirm('仍有 ' + count + ' 个未解决的顶点或 Link 问题。是否继续复制或下载当前列表？');
+      var proceed = window.confirm('仍有 ' + count + ' 个未匹配顶点。是否继续复制或下载当前列表？');
       if (proceed) self.lastResult.issuesAcknowledged = true;
       return proceed;
     };
@@ -1108,13 +950,9 @@
       var root = document.getElementById(self.id + '-root');
       if (!root) return;
       var mode = root.querySelector('#mpe-mode').value;
-      var includeExistingLinks = root.querySelector('#mpe-include-existing-links').checked;
-      var usesDrawTools = mode !== 'bookmarks';
       root.querySelector('#mpe-distance-wrap').style.display =
-        (mode === 'vertices' || mode === 'combined' || (usesDrawTools && includeExistingLinks)) ? '' : 'none';
+        (mode === 'vertices' || mode === 'combined') ? '' : 'none';
       root.querySelector('#mpe-bookmark-wrap').style.display = mode === 'bookmarks' ? '' : 'none';
-      root.querySelector('#mpe-existing-links-wrap').style.display = usesDrawTools ? '' : 'none';
-      root.querySelector('#mpe-link-direction-wrap').style.display = usesDrawTools && includeExistingLinks ? '' : 'none';
     };
 
     self.buildFolderOptions = function (selected) {
@@ -1144,11 +982,7 @@
             '<label id="mpe-distance-wrap">Portal 匹配距离（米）<input id="mpe-distance" type="number" min="1" step="1" value="' + self.escapeHtml(settings.matchDistance) + '"></label>' +
             '<label id="mpe-bookmark-wrap">Bookmarks 文件夹<select id="mpe-bookmark-folder">' + self.buildFolderOptions(settings.bookmarkFolder) + '</select></label>' +
             '<label class="mpe-checkbox"><input id="mpe-include-keys" type="checkbox"' + (settings.includeKeys ? ' checked' : '') + '>包含已有 Key 数量</label>' +
-            '<label id="mpe-existing-links-wrap" class="mpe-checkbox"><input id="mpe-include-existing-links" type="checkbox"' + (settings.includeExistingLinks ? ' checked' : '') + '>导出 Draw Tools Polyline 为 EXISTING_LINK</label>' +
-            '<label id="mpe-link-direction-wrap">EXISTING_LINK 方向<select id="mpe-link-direction">' +
-              '<option value="intel"' + (settings.linkDirection === 'intel' ? ' selected' : '') + '>Intel 实际方向（推荐）</option>' +
-              '<option value="draw"' + (settings.linkDirection === 'draw' ? ' selected' : '') + '>Draw Tools 绘制顺序</option>' +
-            '</select></label>' +
+            '<label class="mpe-checkbox"><input id="mpe-include-existing-links" type="checkbox"' + (settings.includeExistingLinks ? ' checked' : '') + '>导出所选 Portal 间已加载的己方 Intel Link</label>' +
           '</div>' +
           '<div class="mpe-actions">' +
             '<button id="mpe-regenerate" type="button">重新生成</button>' +
@@ -1165,7 +999,7 @@
             '</div>' +
             '<div id="mpe-inventory-message" class="mpe-message"></div>' +
           '</fieldset>' +
-          '<p class="mpe-help">EXISTING_LINK 只应用于行动期间保留的己方现有 Link，并按最终 Portal 行顺序输出从 0 开始的 Portal ID。Intel 方向模式会用 window.links 的 oGuid → dGuid 验证方向；未加载或尚未建立的 Link 不会导出。</p>' +
+          '<p class="mpe-help">EXISTING_LINK 的唯一数据源是 Intel window.links。Draw Tools 只选择 Portal 或区域，绘制的 Polyline 不会直接作为 Link 导出；只有两端都在所选 Portal 中、当前已加载且属于己方的真实 Intel Link 才会输出。</p>' +
           '<p class="mpe-help">钥匙优先级：Live Inventory → 本插件有效的 C.O.R.E. 缓存 → IITC Keys → 0。普通背包与 Capsule/Key Locker 中同一 Portal 的 Key 会合并统计。</p>' +
         '</div>';
 
@@ -1183,11 +1017,7 @@
       });
       root.querySelector('#mpe-bookmark-folder').addEventListener('change', function () { self.regenerate(false); });
       root.querySelector('#mpe-include-keys').addEventListener('change', function () { self.regenerate(false); });
-      root.querySelector('#mpe-include-existing-links').addEventListener('change', function () {
-        self.updateModeControls();
-        self.regenerate(false);
-      });
-      root.querySelector('#mpe-link-direction').addEventListener('change', function () { self.regenerate(false); });
+      root.querySelector('#mpe-include-existing-links').addEventListener('change', function () { self.regenerate(false); });
       root.querySelector('#mpe-regenerate').addEventListener('click', function () { self.regenerate(true); });
       root.querySelector('#mpe-copy').addEventListener('click', self.copyOutput);
       root.querySelector('#mpe-download').addEventListener('click', self.downloadOutput);
