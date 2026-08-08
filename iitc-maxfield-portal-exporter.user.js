@@ -3,7 +3,7 @@
 // @id              iitc-maxfield-portal-exporter@openai-codex
 // @name            IITC plugin: Maxfield Portal Exporter
 // @category        Information
-// @version         2.1.0
+// @version         2.1.1
 // @license         MIT
 // @namespace       https://github.com/IITC-CE/ingress-intel-total-conversion
 // @description     Export Draw Tools/Bookmarks portals, retained Intel links, and C.O.R.E. key counts to Maxfield.
@@ -25,7 +25,7 @@
 
     self.id = 'maxfield-portal-exporter';
     self.title = 'Maxfield Portal Exporter';
-    self.version = '2.1.0';
+    self.version = '2.1.1';
     self.CACHE_KEY = 'plugin-maxfield-portal-exporter-inventory-v2';
     self.SETTINGS_KEY = 'plugin-maxfield-portal-exporter-settings-v2';
     self.CACHE_TTL_MS = 10 * 60 * 1000;
@@ -920,13 +920,15 @@
       return line;
     };
 
-    self.formatExistingLinkLine = function (link, exportNames) {
-      var originName = exportNames[self.portalIdentity(link.originPortal)];
-      var destinationName = exportNames[self.portalIdentity(link.destinationPortal)];
-      if (!originName || !destinationName) {
-        throw new Error('EXISTING_LINK 的端点没有对应的 Portal 导出名称');
+    self.formatExistingLinkLine = function (link, portalIds) {
+      var originIdentity = self.portalIdentity(link.originPortal);
+      var destinationIdentity = self.portalIdentity(link.destinationPortal);
+      var hasOrigin = Object.prototype.hasOwnProperty.call(portalIds, originIdentity);
+      var hasDestination = Object.prototype.hasOwnProperty.call(portalIds, destinationIdentity);
+      if (!hasOrigin || !hasDestination) {
+        throw new Error('EXISTING_LINK 的端点没有对应的 Portal ID');
       }
-      return 'EXISTING_LINK; ' + originName + '; ' + destinationName;
+      return 'EXISTING_LINK; ' + portalIds[originIdentity] + '; ' + portalIds[destinationIdentity];
     };
 
     self.getDialogValues = function () {
@@ -1009,14 +1011,17 @@
         var lines = namedPortals.map(function (portal) {
           return self.formatPortalLine(portal, values.includeKeys);
         });
-        var exportNames = {};
-        namedPortals.forEach(function (portal) {
-          exportNames[self.portalIdentity(portal)] = portal.exportName;
+        // Maxfield Portal IDs are zero-based and follow the order of valid
+        // Portal rows. Build the mapping only after the final export order is
+        // fixed so every EXISTING_LINK endpoint resolves to the correct row.
+        var portalIds = {};
+        namedPortals.forEach(function (portal, index) {
+          portalIds[self.portalIdentity(portal)] = index;
         });
         if (selection.existingLinks.length) {
           lines.push('', '# Existing friendly links retained in Intel');
           selection.existingLinks.forEach(function (link) {
-            lines.push(self.formatExistingLinkLine(link, exportNames));
+            lines.push(self.formatExistingLinkLine(link, portalIds));
           });
         }
         var text = lines.join('\n');
@@ -1160,7 +1165,7 @@
             '</div>' +
             '<div id="mpe-inventory-message" class="mpe-message"></div>' +
           '</fieldset>' +
-          '<p class="mpe-help">EXISTING_LINK 只应用于行动期间保留的己方现有 Link。Intel 方向模式会用 window.links 的 oGuid → dGuid 验证方向；未加载或尚未建立的 Link 不会导出。</p>' +
+          '<p class="mpe-help">EXISTING_LINK 只应用于行动期间保留的己方现有 Link，并按最终 Portal 行顺序输出从 0 开始的 Portal ID。Intel 方向模式会用 window.links 的 oGuid → dGuid 验证方向；未加载或尚未建立的 Link 不会导出。</p>' +
           '<p class="mpe-help">钥匙优先级：Live Inventory → 本插件有效的 C.O.R.E. 缓存 → IITC Keys → 0。普通背包与 Capsule/Key Locker 中同一 Portal 的 Key 会合并统计。</p>' +
         '</div>';
 

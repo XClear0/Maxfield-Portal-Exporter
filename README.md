@@ -22,7 +22,7 @@
 - 将 Draw Tools Polyline 的相邻端点解析为 Link；
 - 优先通过 Intel `window.links` 的 `oGuid → dGuid` 获取实际 Link 方向；
 - 支持显式使用 Draw Tools 绘制顺序作为 Link 方向；
-- 输出 Maxfield `EXISTING_LINK; 起点; 终点` 指令；
+- 按最终 Portal 行顺序输出 Maxfield `EXISTING_LINK; 起点 ID; 终点 ID` 指令；
 - 自动去重并处理同名 Portal；
 - 自动移除名称中的 `;`、`#` 和换行符，避免 Maxfield 误解析；
 - 自动读取 C.O.R.E. Inventory、Live Inventory 或 IITC Keys 中的 Key 数量；
@@ -123,10 +123,10 @@ IITC → Toolbox → Maxfield Export
 最新版 Maxfield 可以在 Portal 文件中声明行动期间需要保留的己方现有 Link：
 
 ```text
-EXISTING_LINK; 起点 Portal; 终点 Portal
+EXISTING_LINK; 0; 1
 ```
 
-这表示有向 Link `起点 → 终点`。方向固定并占用起点 Portal 的出链容量，因此不能只知道两个端点而忽略方向。
+这表示有向 Link `Portal 0 → Portal 1`。Portal ID 从 `0` 开始，按照文件中有效 Portal 行的顺序分配；空行、注释和 `EXISTING_LINK` 行不占用 ID。方向固定并占用起点 Portal 的出链容量，因此不能只知道两个端点而忽略方向。
 
 ### 使用 Intel 实际方向（推荐）
 
@@ -167,7 +167,7 @@ Draw Tools 标准数据只保存坐标顺序，不保存 Ingress Link 的语义�
 - 多段 Polyline 按相邻顶点拆成多条 Link；
 - Link 两端会自动加入 Portal 列表，即使它们不在当前区域筛选结果中；
 - 相同端点的重复线会按无向 Portal 对去重；
-- 指令使用清理和重名处理后的最终 Portal 名称；
+- 指令使用最终 Portal 行顺序对应的零基整数 ID，避免名称重复或名称清理造成歧义；
 - 该功能只应用于行动期间继续保留的己方现有 Link，不应把尚未建立的规划线标记为 `EXISTING_LINK`。
 
 ## C.O.R.E. Inventory 与 Key 数量
@@ -233,15 +233,17 @@ Maxfield 使用英文分号拆分字段，并将 `#` 视为注释。导出时脚
 - 合并连续空格；
 - 为重名 Portal 添加 `(2)`、`(3)` 等序号。
 
-Existing Link 指令会引用处理后的最终名称，例如：
+Portal 名称处理不会影响 Existing Link 的端点解析。脚本会在最终 Portal 顺序确定后分配从 `0` 开始的 ID，例如：
 
 ```text
 Portal Alpha; https://intel.ingress.com/intel?...&pll=31.230400,121.473700; 3
 Portal Bravo; https://intel.ingress.com/intel?...&pll=31.231000,121.474500; 1
 
 # Existing friendly links retained in Intel
-EXISTING_LINK; Portal Alpha; Portal Bravo
+EXISTING_LINK; 0; 1
 ```
+
+这里的 `0` 是 `Portal Alpha`，`1` 是 `Portal Bravo`。该编号与 Maxfield 地图及结果文件中的 `#` 编号一致。
 
 ### SBUL
 
@@ -292,7 +294,7 @@ docker run --rm `
 - 确认当前页面是 `https://intel.ingress.com/`；
 - 确认 IITC-CE 已正常加载；
 - 刷新 Intel 页面；
-- 查看浏览器控制台是否出现 `Maxfield Portal Exporter v2.1.0 loaded`。
+- 查看浏览器控制台是否出现 `Maxfield Portal Exporter v2.1.1 loaded`。
 
 ### 提示 Draw Tools 未安装或尚未加载
 
@@ -362,7 +364,7 @@ export PYTHONUTF8=1
 node --check iitc-maxfield-portal-exporter.user.js
 ```
 
-当前脚本版本：`2.1.0`。
+当前脚本版本：`2.1.1`。
 
 ## 开源许可
 
