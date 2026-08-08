@@ -2,7 +2,7 @@
 
 一个运行在 [IITC-CE](https://iitc.app/) 中的用户脚本，用于把 Draw Tools 图形或 Portal Bookmarks 转换为 [Ingress Maxfield](https://github.com/XClear0/maxfield) 可直接读取的 Portal 列表。
 
-脚本可以读取 C.O.R.E. Inventory 中的真实 Key 数量，并将普通背包与 Capsule / Key Locker 中属于同一 Portal 的 Key 合并统计。导出结果可以直接复制，或下载为 UTF-8 编码的 `maxfield-portals.txt`。
+脚本可以读取 C.O.R.E. Inventory 中的真实 Key 数量，并将普通背包与 Capsule / Key Locker 中属于同一 Portal 的 Key 合并统计；还可以把 Draw Tools Polyline 与当前 Intel Link 对照，生成 Maxfield 的有向 `EXISTING_LINK` 指令。导出结果可以直接复制，或下载为 UTF-8 编码的 `maxfield-portals.txt`。
 
 > 本项目是非官方工具，与 Niantic、Ingress、IITC-CE 或 Maxfield 项目没有隶属关系。
 
@@ -15,13 +15,17 @@
 - 顶点按可配置距离匹配最近 Portal，默认距离为 25 米；
 - 同时使用当前已加载 Portal 和 Bookmarks 作为候选数据；
 - 提示未匹配的 Draw Tools 顶点及最近 Portal 距离；
+- 将 Draw Tools Polyline 的相邻端点解析为 Link；
+- 优先通过 Intel `window.links` 的 `oGuid → dGuid` 获取实际 Link 方向；
+- 支持显式使用 Draw Tools 绘制顺序作为 Link 方向；
+- 输出 Maxfield `EXISTING_LINK; 起点; 终点` 指令；
 - 自动去重并处理同名 Portal；
 - 自动移除名称中的 `;`、`#` 和换行符，避免 Maxfield 误解析；
 - 自动读取 C.O.R.E. Inventory、Live Inventory 或 IITC Keys 中的 Key 数量；
 - 汇总普通背包和 Capsule / Key Locker 中的 Key；
 - 使用 10 分钟库存缓存，避免频繁请求 Intel；
 - 支持复制结果和下载 `maxfield-portals.txt`；
-- 保存上次使用的导出模式、匹配距离、Bookmarks 文件夹及 Key 选项。
+- 保存上次使用的导出模式、匹配距离、Bookmarks 文件夹、Key 及 Existing Link 选项。
 
 ## 运行要求
 
@@ -110,6 +114,58 @@ IITC → Toolbox → Maxfield Export
 
 选择 **Bookmarks 文件夹** 后，可以直接导出某个 IITC Portal Bookmarks 文件夹中的全部 Portal，不需要 Draw Tools。
 
+## 导出现有 Link
+
+最新版 Maxfield 可以在 Portal 文件中声明行动期间需要保留的己方现有 Link：
+
+```text
+EXISTING_LINK; 起点 Portal; 终点 Portal
+```
+
+这表示有向 Link `起点 → 终点`。方向固定并占用起点 Portal 的出链容量，因此不能只知道两个端点而忽略方向。
+
+### 使用 Intel 实际方向（推荐）
+
+1. 在 Intel 中移动和缩放地图，确保需要保留的 Link 已经加载并显示；
+2. 使用 Draw Tools Polyline 描出这些 Link；
+3. 打开 **Maxfield Export**；
+4. 勾选 **导出 Draw Tools Polyline 为 EXISTING_LINK**；
+5. 方向选择 **Intel 实际方向（推荐）**；
+6. 点击 **重新生成**；
+7. 检查已导出及未导出的 Link 数量。
+
+脚本首先把每条 Polyline 的相邻端点匹配到 Portal，然后按无向 GUID 对在 `window.links` 中查找实际 Intel Link，最终使用：
+
+```js
+link.options.data.oGuid // 起点 Portal GUID
+link.options.data.dGuid // 终点 Portal GUID
+```
+
+只有当前已加载、方向得到 Intel 验证且属于当前玩家阵营的 Link 才会导出。尚未建立、未加载、阵营不符或端点未匹配的线会列在“未导出的 EXISTING_LINK”中。
+
+### 使用 Draw Tools 绘制顺序
+
+选择 **Draw Tools 绘制顺序** 时，每个 Polyline 相邻点按以下方向解释：
+
+```text
+第一个点 → 第二个点
+第二个点 → 第三个点
+……
+```
+
+Draw Tools 标准数据只保存坐标顺序，不保存 Ingress Link 的语义方向。因此该模式只适合你明确按照实际方向绘制的线，导出前必须人工确认。
+
+### Existing Link 导出规则
+
+- 只处理 Draw Tools Polyline；
+- Polygon 用于选区，其边界不会自动视为现有 Link；
+- Circle 和 Marker 不会生成 Link；
+- 多段 Polyline 按相邻顶点拆成多条 Link；
+- Link 两端会自动加入 Portal 列表，即使它们不在当前区域筛选结果中；
+- 相同端点的重复线会按无向 Portal 对去重；
+- 指令使用清理和重名处理后的最终 Portal 名称；
+- 该功能只应用于行动期间继续保留的己方现有 Link，不应把尚未建立的规划线标记为 `EXISTING_LINK`。
+
 ## C.O.R.E. Inventory 与 Key 数量
 
 勾选“包含已有 Key 数量”后，每个 Portal 会按照以下顺序选择库存来源：
@@ -173,6 +229,16 @@ Maxfield 使用英文分号拆分字段，并将 `#` 视为注释。导出时脚
 - 合并连续空格；
 - 为重名 Portal 添加 `(2)`、`(3)` 等序号。
 
+Existing Link 指令会引用处理后的最终名称，例如：
+
+```text
+Portal Alpha; https://intel.ingress.com/intel?...&pll=31.230400,121.473700; 3
+Portal Bravo; https://intel.ingress.com/intel?...&pll=31.231000,121.474500; 1
+
+# Existing friendly links retained in Intel
+EXISTING_LINK; Portal Alpha; Portal Bravo
+```
+
 ### SBUL
 
 脚本不会判断 Portal 是否已经安装或计划安装 SBUL。需要时可以在导出文本框中手动追加：
@@ -222,7 +288,7 @@ docker run --rm `
 - 确认当前页面是 `https://intel.ingress.com/`；
 - 确认 IITC-CE 已正常加载；
 - 刷新 Intel 页面；
-- 查看浏览器控制台是否出现 `Maxfield Portal Exporter v2.0.0 loaded`。
+- 查看浏览器控制台是否出现 `Maxfield Portal Exporter v2.1.0 loaded`。
 
 ### 提示 Draw Tools 未安装或尚未加载
 
@@ -241,6 +307,15 @@ docker run --rm `
 ### 区域内缺少 Portal
 
 区域模式不会批量获取未加载的 Intel 数据。请分块移动地图、等待 Portal 出现，或使用 Bookmarks 补充数据后重新生成。
+
+### Draw Tools 线没有导出为 EXISTING_LINK
+
+- 确认使用的是 Polyline，而不是 Polygon 边界；
+- 确认两个端点都在匹配距离内存在已加载 Portal 或 Bookmark；
+- 使用 Intel 实际方向时，确认对应 Link 当前已在 Intel 地图上加载；
+- 尚未实际建立的规划线不会在 Intel 方向模式中导出；
+- 必须使用绘制顺序时，切换方向选项并逐条核对方向；
+- 查看“未导出的 EXISTING_LINK”列表中的具体原因和坐标。
 
 ### Key 数量全部为 0
 
@@ -283,7 +358,7 @@ export PYTHONUTF8=1
 node --check iitc-maxfield-portal-exporter.user.js
 ```
 
-当前脚本版本：`2.0.0`。
+当前脚本版本：`2.1.0`。
 
 ## 开源许可
 

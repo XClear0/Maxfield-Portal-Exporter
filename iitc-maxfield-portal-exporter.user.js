@@ -3,10 +3,10 @@
 // @id              iitc-maxfield-portal-exporter@openai-codex
 // @name            IITC plugin: Maxfield Portal Exporter
 // @category        Information
-// @version         2.0.0
+// @version         2.1.0
 // @license         MIT
 // @namespace       https://github.com/IITC-CE/ingress-intel-total-conversion
-// @description     Export Draw Tools vertices/areas or Bookmarks to Maxfield, with C.O.R.E. inventory key counts.
+// @description     Export Draw Tools/Bookmarks portals, retained Intel links, and C.O.R.E. key counts to Maxfield.
 // @include         https://intel.ingress.com/*
 // @match           https://intel.ingress.com/*
 // @grant           none
@@ -25,7 +25,7 @@
 
     self.id = 'maxfield-portal-exporter';
     self.title = 'Maxfield Portal Exporter';
-    self.version = '2.0.0';
+    self.version = '2.1.0';
     self.CACHE_KEY = 'plugin-maxfield-portal-exporter-inventory-v2';
     self.SETTINGS_KEY = 'plugin-maxfield-portal-exporter-settings-v2';
     self.CACHE_TTL_MS = 10 * 60 * 1000;
@@ -72,7 +72,9 @@
         mode: 'vertices',
         matchDistance: self.DEFAULT_MATCH_DISTANCE,
         bookmarkFolder: '',
-        includeKeys: true
+        includeKeys: true,
+        includeExistingLinks: false,
+        linkDirection: 'intel'
       };
       try {
         var stored = JSON.parse(localStorage.getItem(self.SETTINGS_KEY) || '{}');
@@ -81,6 +83,8 @@
           if (Number(stored.matchDistance) > 0) defaults.matchDistance = Number(stored.matchDistance);
           if (typeof stored.bookmarkFolder === 'string') defaults.bookmarkFolder = stored.bookmarkFolder;
           if (typeof stored.includeKeys === 'boolean') defaults.includeKeys = stored.includeKeys;
+          if (typeof stored.includeExistingLinks === 'boolean') defaults.includeExistingLinks = stored.includeExistingLinks;
+          if (['intel', 'draw'].indexOf(stored.linkDirection) !== -1) defaults.linkDirection = stored.linkDirection;
         }
       } catch (e) {
         console.warn(self.title + ': could not load settings', e);
@@ -95,11 +99,15 @@
       var distance = root.querySelector('#mpe-distance');
       var folder = root.querySelector('#mpe-bookmark-folder');
       var includeKeys = root.querySelector('#mpe-include-keys');
+      var includeExistingLinks = root.querySelector('#mpe-include-existing-links');
+      var linkDirection = root.querySelector('#mpe-link-direction');
       var data = {
         mode: mode ? mode.value : 'vertices',
         matchDistance: distance && Number(distance.value) > 0 ? Number(distance.value) : self.DEFAULT_MATCH_DISTANCE,
         bookmarkFolder: folder ? folder.value : '',
-        includeKeys: includeKeys ? includeKeys.checked : true
+        includeKeys: includeKeys ? includeKeys.checked : true,
+        includeExistingLinks: includeExistingLinks ? includeExistingLinks.checked : false,
+        linkDirection: linkDirection ? linkDirection.value : 'intel'
       };
       try {
         localStorage.setItem(self.SETTINGS_KEY, JSON.stringify(data));
@@ -520,6 +528,202 @@
       return unique;
     };
 
+    self.normalisePolylinePaths = function (latlngs) {
+      if (!Array.isArray(latlngs) || !latlngs.length) return [];
+      if (self.isLatLng(latlngs[0])) return [latlngs];
+      var paths = [];
+      latlngs.forEach(function (part) {
+        paths = paths.concat(self.normalisePolylinePaths(part));
+      });
+      return paths;
+    };
+
+    self.getDrawLinkSegments = function (layers) {
+      var segments = [];
+      layers.forEach(function (layer, layerIndex) {
+        // Filled polygons select an area; their borders are not assumed to be
+        // retained Intel links. Circles and markers are not links either.
+        if (
+          self.isCircleLayer(layer) ||
+          self.isPolygonLayer(layer) ||
+          self.isMarkerLayer(layer) ||
+          typeof layer.getLatLngs !== 'function'
+        ) {
+          return;
+        }
+
+        self.normalisePolylinePaths(layer.getLatLngs()).forEach(function (path, pathIndex) {
+          for (var i = 0; i < path.length - 1; i += 1) {
+            segments.push({
+              layerIndex: layerIndex,
+              pathIndex: pathIndex,
+              segmentIndex: i,
+              firstPoint: window.L.latLng(Number(path[i].lat), Number(path[i].lng)),
+              secondPoint: window.L.latLng(Number(path[i + 1].lat), Number(path[i + 1].lng))
+            });
+          }
+        });
+      });
+      return segments;
+    };
+
+    self.matchPointToPortal = function (point, candidates, maxDistance) {
+      var best = null;
+      var bestDistance = Infinity;
+      candidates.forEach(function (portal) {
+        var distance = point.distanceTo(window.L.latLng(portal.lat, portal.lng));
+        if (distance < bestDistance) {
+          best = portal;
+          bestDistance = distance;
+        }
+      });
+      if (!best || bestDistance > maxDistance) {
+        return {
+          portal: null,
+          nearestPortal: best,
+          distance: Number.isFinite(bestDistance) ? bestDistance : null
+        };
+      }
+      return { portal: best, nearestPortal: best, distance: bestDistance };
+    };
+
+    self.linkPairKey = function (first, second) {
+      return [String(first), String(second)].sort().join('|');
+    };
+
+    self.getIntelLinkIndex = function () {
+      var index = {};
+      var playerTeamId = null;
+      if (window.PLAYER && typeof window.teamStringToId === 'function') {
+        playerTeamId = window.teamStringToId(window.PLAYER.team);
+      }
+      Object.keys(window.links || {}).forEach(function (linkGuid) {
+        var link = window.links[linkGuid];
+        var data = link && link.options ? link.options.data : null;
+        if (!data || !data.oGuid || !data.dGuid) return;
+        var linkTeamId = typeof window.teamStringToId === 'function' ? window.teamStringToId(data.team) : null;
+        index[self.linkPairKey(data.oGuid, data.dGuid)] = {
+          linkGuid: linkGuid,
+          originGuid: data.oGuid,
+          destinationGuid: data.dGuid,
+          team: data.team,
+          isFriendly: playerTeamId === null || linkTeamId === null ? null : playerTeamId === linkTeamId
+        };
+      });
+      return index;
+    };
+
+    self.collectExistingLinks = function (layers, candidates, maxDistance, directionMode) {
+      var segments = self.getDrawLinkSegments(layers);
+      var intelLinks = self.getIntelLinkIndex();
+      var links = [];
+      var unresolved = [];
+      var seen = {};
+      var duplicateCount = 0;
+
+      segments.forEach(function (segment) {
+        var firstMatch = self.matchPointToPortal(segment.firstPoint, candidates, maxDistance);
+        var secondMatch = self.matchPointToPortal(segment.secondPoint, candidates, maxDistance);
+        var location = '图层 ' + (segment.layerIndex + 1) + '，线段 ' + (segment.segmentIndex + 1);
+
+        if (!firstMatch.portal || !secondMatch.portal) {
+          var missing = [];
+          if (!firstMatch.portal) missing.push('第一个端点');
+          if (!secondMatch.portal) missing.push('第二个端点');
+          unresolved.push({
+            location: location,
+            reason: missing.join('、') + '未在 ' + maxDistance + ' 米内匹配到 Portal',
+            firstPoint: segment.firstPoint,
+            secondPoint: segment.secondPoint
+          });
+          return;
+        }
+
+        var firstPortal = firstMatch.portal;
+        var secondPortal = secondMatch.portal;
+        var firstIdentity = self.portalIdentity(firstPortal);
+        var secondIdentity = self.portalIdentity(secondPortal);
+        if (firstIdentity === secondIdentity) {
+          unresolved.push({
+            location: location,
+            reason: '两个端点匹配到了同一个 Portal',
+            firstPoint: segment.firstPoint,
+            secondPoint: segment.secondPoint
+          });
+          return;
+        }
+
+        var originPortal = firstPortal;
+        var destinationPortal = secondPortal;
+        var directionSource = 'draw';
+        var intelLink = null;
+
+        if (directionMode === 'intel') {
+          if (!firstPortal.guid || !secondPortal.guid) {
+            unresolved.push({
+              location: location,
+              reason: '端点缺少 Portal GUID，无法验证 Intel Link 方向',
+              firstPoint: segment.firstPoint,
+              secondPoint: segment.secondPoint
+            });
+            return;
+          }
+          intelLink = intelLinks[self.linkPairKey(firstPortal.guid, secondPortal.guid)];
+          if (!intelLink) {
+            unresolved.push({
+              location: location,
+              reason: '当前已加载的 Intel Link 中没有这对端点',
+              firstPoint: segment.firstPoint,
+              secondPoint: segment.secondPoint
+            });
+            return;
+          }
+          if (intelLink.isFriendly === false) {
+            unresolved.push({
+              location: location,
+              reason: '对应 Intel Link 不属于当前玩家阵营，不能作为保留的己方 EXISTING_LINK',
+              firstPoint: segment.firstPoint,
+              secondPoint: segment.secondPoint
+            });
+            return;
+          }
+          if (firstPortal.guid === intelLink.originGuid) {
+            originPortal = firstPortal;
+            destinationPortal = secondPortal;
+          } else {
+            originPortal = secondPortal;
+            destinationPortal = firstPortal;
+          }
+          directionSource = 'intel';
+        }
+
+        var identity = self.linkPairKey(
+          self.portalIdentity(originPortal),
+          self.portalIdentity(destinationPortal)
+        );
+        if (seen[identity]) {
+          duplicateCount += 1;
+          return;
+        }
+        seen[identity] = true;
+        links.push({
+          originPortal: originPortal,
+          destinationPortal: destinationPortal,
+          directionSource: directionSource,
+          intelLinkGuid: intelLink ? intelLink.linkGuid : '',
+          team: intelLink ? intelLink.team : undefined,
+          location: location
+        });
+      });
+
+      return {
+        links: links,
+        unresolved: unresolved,
+        segmentCount: segments.length,
+        duplicateCount: duplicateCount
+      };
+    };
+
     self.getAreaLayers = function (layers) {
       return layers.filter(function (layer) { return self.isCircleLayer(layer) || self.isPolygonLayer(layer); });
     };
@@ -596,7 +800,7 @@
       return { portals: self.mergePortals([matched]), unmatched: unmatched };
     };
 
-    self.collectSelection = function (mode, maxDistance, folderId) {
+    self.collectSelection = function (mode, maxDistance, folderId, includeExistingLinks, linkDirection) {
       if (mode === 'bookmarks') {
         if (!folderId) throw new Error('请选择一个 Bookmarks 文件夹');
         return {
@@ -604,6 +808,10 @@
           unmatched: [],
           vertexCount: 0,
           areaCount: 0,
+          existingLinks: [],
+          existingLinkSegments: 0,
+          unresolvedLinks: [],
+          duplicateExistingLinks: 0,
           notes: []
         };
       }
@@ -611,7 +819,17 @@
       var layers = self.getDrawLayers();
       if (!layers.length) throw new Error('Draw Tools 中没有图形');
       var candidates = self.getPortalCandidates();
-      var result = { portals: [], unmatched: [], vertexCount: 0, areaCount: 0, notes: [] };
+      var result = {
+        portals: [],
+        unmatched: [],
+        vertexCount: 0,
+        areaCount: 0,
+        existingLinks: [],
+        existingLinkSegments: 0,
+        unresolvedLinks: [],
+        duplicateExistingLinks: 0,
+        notes: []
+      };
 
       if (mode === 'vertices' || mode === 'combined') {
         var vertices = self.getDrawVertices(layers);
@@ -631,6 +849,23 @@
         result.portals = result.portals.concat(inside);
         result.notes.push('区域结果仅包含 IITC 当前已加载的 Portal 与 Bookmarks；请先移动/缩放地图以加载完整数据。');
         if (!areas.length) result.notes.push('Draw Tools 中没有多边形、矩形或圆形区域。');
+      }
+
+      if (includeExistingLinks) {
+        var existing = self.collectExistingLinks(layers, candidates, maxDistance, linkDirection);
+        result.existingLinks = existing.links;
+        result.existingLinkSegments = existing.segmentCount;
+        result.unresolvedLinks = existing.unresolved;
+        result.duplicateExistingLinks = existing.duplicateCount;
+        existing.links.forEach(function (link) {
+          result.portals.push(link.originPortal, link.destinationPortal);
+        });
+        if (!existing.segmentCount) {
+          result.notes.push('没有找到可作为 EXISTING_LINK 的 Draw Tools Polyline；Polygon 边界不会自动作为现有 Link。');
+        }
+        if (linkDirection === 'draw' && existing.links.length) {
+          result.notes.push('EXISTING_LINK 方向采用 Draw Tools 绘制顺序：每段第一个点 → 第二个点，请确认它与 Intel 实际方向一致。');
+        }
       }
 
       result.portals = self.mergePortals([result.portals]);
@@ -685,6 +920,15 @@
       return line;
     };
 
+    self.formatExistingLinkLine = function (link, exportNames) {
+      var originName = exportNames[self.portalIdentity(link.originPortal)];
+      var destinationName = exportNames[self.portalIdentity(link.destinationPortal)];
+      if (!originName || !destinationName) {
+        throw new Error('EXISTING_LINK 的端点没有对应的 Portal 导出名称');
+      }
+      return 'EXISTING_LINK; ' + originName + '; ' + destinationName;
+    };
+
     self.getDialogValues = function () {
       var root = document.getElementById(self.id + '-root');
       if (!root) throw new Error('导出窗口已关闭');
@@ -693,7 +937,9 @@
         mode: root.querySelector('#mpe-mode').value,
         maxDistance: Number.isFinite(distance) && distance > 0 ? distance : self.DEFAULT_MATCH_DISTANCE,
         folderId: root.querySelector('#mpe-bookmark-folder').value,
-        includeKeys: root.querySelector('#mpe-include-keys').checked
+        includeKeys: root.querySelector('#mpe-include-keys').checked,
+        includeExistingLinks: root.querySelector('#mpe-include-existing-links').checked,
+        linkDirection: root.querySelector('#mpe-link-direction').value
       };
     };
 
@@ -704,6 +950,10 @@
       parts.push('<strong>已生成 ' + selection.portals.length + ' 个 Portal。</strong>');
       if (selection.vertexCount) parts.push('Draw Tools 顶点：' + selection.vertexCount + '。');
       if (selection.areaCount) parts.push('区域图形：' + selection.areaCount + '。');
+      if (selection.existingLinkSegments) {
+        parts.push('Draw Tools Link 线段：' + selection.existingLinkSegments + '；已导出 EXISTING_LINK：' + selection.existingLinks.length + '。');
+      }
+      if (selection.duplicateExistingLinks) parts.push('重复 Link 已忽略：' + selection.duplicateExistingLinks + '。');
       if (renamed) parts.push('重名处理：' + renamed + ' 个名称已添加序号。');
 
       if (selection.unmatched.length) {
@@ -717,6 +967,16 @@
           }).join('') + '</ol></details>');
       }
 
+      if (selection.unresolvedLinks.length) {
+        parts.push('<div class="mpe-warn"><strong>未导出的 EXISTING_LINK：' + selection.unresolvedLinks.length + '</strong></div>');
+        parts.push('<details><summary>查看未导出的 Link</summary><ol class="mpe-unmatched">' +
+          selection.unresolvedLinks.map(function (item) {
+            var coordinates = self.formatCoordinate(item.firstPoint.lat) + ',' + self.formatCoordinate(item.firstPoint.lng) +
+              ' → ' + self.formatCoordinate(item.secondPoint.lat) + ',' + self.formatCoordinate(item.secondPoint.lng);
+            return '<li>' + self.escapeHtml(item.location + '：' + item.reason + '（' + coordinates + '）') + '</li>';
+          }).join('') + '</ol></details>');
+      }
+
       selection.notes.forEach(function (note) {
         parts.push('<div class="mpe-warn">' + self.escapeHtml(note) + '</div>');
       });
@@ -726,26 +986,47 @@
     self.regenerate = function (promptForUnmatched) {
       try {
         var values = self.getDialogValues();
-        var selection = self.collectSelection(values.mode, values.maxDistance, values.folderId);
-        if (promptForUnmatched && selection.unmatched.length) {
+        var selection = self.collectSelection(
+          values.mode,
+          values.maxDistance,
+          values.folderId,
+          values.includeExistingLinks && values.mode !== 'bookmarks',
+          values.linkDirection
+        );
+        var issueCount = selection.unmatched.length + selection.unresolvedLinks.length;
+        if (promptForUnmatched && issueCount) {
+          var issueText = [];
+          if (selection.unmatched.length) issueText.push(selection.unmatched.length + ' 个 Draw Tools 顶点未匹配');
+          if (selection.unresolvedLinks.length) issueText.push(selection.unresolvedLinks.length + ' 条 EXISTING_LINK 未导出');
           var proceed = window.confirm(
-            '有 ' + selection.unmatched.length + ' 个 Draw Tools 顶点未在 ' + values.maxDistance + ' 米内匹配到 Portal。\n\n是否继续生成只包含已匹配 Portal 的列表？'
+            '存在以下问题：' + issueText.join('；') + '。\n\n是否继续生成其余已确认的数据？'
           );
           if (!proceed) return false;
         }
 
         var namedPortals = self.makeUniqueNames(selection.portals);
         var renamed = namedPortals.length ? (namedPortals[namedPortals.length - 1]._renamedTotal || 0) : 0;
-        var text = namedPortals.map(function (portal) {
+        var lines = namedPortals.map(function (portal) {
           return self.formatPortalLine(portal, values.includeKeys);
-        }).join('\n');
+        });
+        var exportNames = {};
+        namedPortals.forEach(function (portal) {
+          exportNames[self.portalIdentity(portal)] = portal.exportName;
+        });
+        if (selection.existingLinks.length) {
+          lines.push('', '# Existing friendly links retained in Intel');
+          selection.existingLinks.forEach(function (link) {
+            lines.push(self.formatExistingLinkLine(link, exportNames));
+          });
+        }
+        var text = lines.join('\n');
 
         var textarea = document.getElementById('mpe-output');
         if (textarea) textarea.value = text;
         selection.portals = namedPortals;
         self.lastResult = {
           selection: selection,
-          unmatchedAcknowledged: promptForUnmatched || selection.unmatched.length === 0
+          issuesAcknowledged: promptForUnmatched || issueCount === 0
         };
         self.renderResultStatus(selection, renamed);
         self.renderInventoryStatus();
@@ -760,10 +1041,12 @@
     };
 
     self.confirmUnmatched = function () {
-      if (!self.lastResult || !self.lastResult.selection.unmatched.length || self.lastResult.unmatchedAcknowledged) return true;
-      var count = self.lastResult.selection.unmatched.length;
-      var proceed = window.confirm('仍有 ' + count + ' 个顶点未匹配。是否继续复制或下载当前列表？');
-      if (proceed) self.lastResult.unmatchedAcknowledged = true;
+      if (!self.lastResult || self.lastResult.issuesAcknowledged) return true;
+      var selection = self.lastResult.selection;
+      var count = selection.unmatched.length + selection.unresolvedLinks.length;
+      if (!count) return true;
+      var proceed = window.confirm('仍有 ' + count + ' 个未解决的顶点或 Link 问题。是否继续复制或下载当前列表？');
+      if (proceed) self.lastResult.issuesAcknowledged = true;
       return proceed;
     };
 
@@ -820,8 +1103,13 @@
       var root = document.getElementById(self.id + '-root');
       if (!root) return;
       var mode = root.querySelector('#mpe-mode').value;
-      root.querySelector('#mpe-distance-wrap').style.display = (mode === 'vertices' || mode === 'combined') ? '' : 'none';
+      var includeExistingLinks = root.querySelector('#mpe-include-existing-links').checked;
+      var usesDrawTools = mode !== 'bookmarks';
+      root.querySelector('#mpe-distance-wrap').style.display =
+        (mode === 'vertices' || mode === 'combined' || (usesDrawTools && includeExistingLinks)) ? '' : 'none';
       root.querySelector('#mpe-bookmark-wrap').style.display = mode === 'bookmarks' ? '' : 'none';
+      root.querySelector('#mpe-existing-links-wrap').style.display = usesDrawTools ? '' : 'none';
+      root.querySelector('#mpe-link-direction-wrap').style.display = usesDrawTools && includeExistingLinks ? '' : 'none';
     };
 
     self.buildFolderOptions = function (selected) {
@@ -848,9 +1136,14 @@
               '<option value="combined"' + (settings.mode === 'combined' ? ' selected' : '') + '>顶点 + 区域（合并）</option>' +
               '<option value="bookmarks"' + (settings.mode === 'bookmarks' ? ' selected' : '') + '>Bookmarks 文件夹</option>' +
             '</select></label>' +
-            '<label id="mpe-distance-wrap">顶点匹配距离（米）<input id="mpe-distance" type="number" min="1" step="1" value="' + self.escapeHtml(settings.matchDistance) + '"></label>' +
+            '<label id="mpe-distance-wrap">Portal 匹配距离（米）<input id="mpe-distance" type="number" min="1" step="1" value="' + self.escapeHtml(settings.matchDistance) + '"></label>' +
             '<label id="mpe-bookmark-wrap">Bookmarks 文件夹<select id="mpe-bookmark-folder">' + self.buildFolderOptions(settings.bookmarkFolder) + '</select></label>' +
             '<label class="mpe-checkbox"><input id="mpe-include-keys" type="checkbox"' + (settings.includeKeys ? ' checked' : '') + '>包含已有 Key 数量</label>' +
+            '<label id="mpe-existing-links-wrap" class="mpe-checkbox"><input id="mpe-include-existing-links" type="checkbox"' + (settings.includeExistingLinks ? ' checked' : '') + '>导出 Draw Tools Polyline 为 EXISTING_LINK</label>' +
+            '<label id="mpe-link-direction-wrap">EXISTING_LINK 方向<select id="mpe-link-direction">' +
+              '<option value="intel"' + (settings.linkDirection === 'intel' ? ' selected' : '') + '>Intel 实际方向（推荐）</option>' +
+              '<option value="draw"' + (settings.linkDirection === 'draw' ? ' selected' : '') + '>Draw Tools 绘制顺序</option>' +
+            '</select></label>' +
           '</div>' +
           '<div class="mpe-actions">' +
             '<button id="mpe-regenerate" type="button">重新生成</button>' +
@@ -867,6 +1160,7 @@
             '</div>' +
             '<div id="mpe-inventory-message" class="mpe-message"></div>' +
           '</fieldset>' +
+          '<p class="mpe-help">EXISTING_LINK 只应用于行动期间保留的己方现有 Link。Intel 方向模式会用 window.links 的 oGuid → dGuid 验证方向；未加载或尚未建立的 Link 不会导出。</p>' +
           '<p class="mpe-help">钥匙优先级：Live Inventory → 本插件有效的 C.O.R.E. 缓存 → IITC Keys → 0。普通背包与 Capsule/Key Locker 中同一 Portal 的 Key 会合并统计。</p>' +
         '</div>';
 
@@ -884,6 +1178,11 @@
       });
       root.querySelector('#mpe-bookmark-folder').addEventListener('change', function () { self.regenerate(false); });
       root.querySelector('#mpe-include-keys').addEventListener('change', function () { self.regenerate(false); });
+      root.querySelector('#mpe-include-existing-links').addEventListener('change', function () {
+        self.updateModeControls();
+        self.regenerate(false);
+      });
+      root.querySelector('#mpe-link-direction').addEventListener('change', function () { self.regenerate(false); });
       root.querySelector('#mpe-regenerate').addEventListener('click', function () { self.regenerate(true); });
       root.querySelector('#mpe-copy').addEventListener('click', self.copyOutput);
       root.querySelector('#mpe-download').addEventListener('click', self.downloadOutput);
