@@ -6,6 +6,10 @@
 
 > 本项目是非官方工具，与 Niantic、Ingress、IITC-CE 或 Maxfield 项目没有隶属关系。
 
+## 脚本链接
+
+[点击安装](https://github.com/XClear0/Maxfield-Portal-Exporter/raw/refs/heads/main/iitc-maxfield-portal-exporter.user.js)
+
 ## 主要功能
 
 - 从 Draw Tools 线段、Polyline、Polygon 和 Marker 的顶点匹配 Portal；
