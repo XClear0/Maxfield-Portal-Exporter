@@ -1,6 +1,6 @@
 # Maxfield Portal Exporter
 
-一个运行在 [IITC-CE](https://iitc.app/) 中的用户脚本，用于把 Draw Tools 图形或 Portal Bookmarks 转换为 [Ingress Maxfield](https://github.com/XClear0/maxfield) 可直接读取的 Portal 列表。
+一个运行在 [IITC-CE](https://iitc.app/) 中的用户脚本，用于把 Draw Tools 图形选出的 Portal 转换为 [Ingress Maxfield](https://github.com/XClear0/maxfield) 可直接读取的 Portal 列表，并可显式包含或排除全部 Portal Bookmarks。
 
 脚本可以读取 C.O.R.E. Inventory 中的真实 Key 数量，并将普通背包与 Capsule / Key Locker 中属于同一 Portal 的 Key 合并统计；还可以扫描 Intel 当前已加载的真实 Link，生成 Maxfield 的有向 `EXISTING_LINK` 指令。导出结果可以直接复制，或下载为 UTF-8 编码的 `maxfield-portals.txt`。
 
@@ -15,9 +15,10 @@
 - 从 Draw Tools 线段、Polyline、Polygon 和 Marker 的顶点匹配 Portal；
 - 导出 Draw Tools 多边形、矩形和圆形区域内的 Portal；
 - 合并顶点匹配结果与区域内 Portal；
-- 导出指定的 IITC Bookmarks 文件夹；
+- 通过“包含 Bookmarks”显式合并全部收藏 Portal；
+- 通过“排除 Bookmarks”显式移除全部收藏 Portal；
 - 顶点按可配置距离匹配最近 Portal，默认距离为 25 米；
-- 同时使用当前已加载 Portal 和 Bookmarks 作为候选数据；
+- 未选择 Bookmarks 规则时，只使用 IITC 当前已加载 Portal，不读取 Bookmarks 参与筛选；
 - 提示未匹配的 Draw Tools 顶点及最近 Portal 距离；
 - 从 Intel `window.links` 读取当前已经存在的 Link；
 - 只导出两个端点都属于所选 Portal 集合的己方 Link；
@@ -30,7 +31,7 @@
 - 汇总普通背包和 Capsule / Key Locker 中的 Key；
 - 使用 10 分钟库存缓存，避免频繁请求 Intel；
 - 支持复制结果和下载 `maxfield-portals.txt`；
-- 保存上次使用的导出模式、匹配距离、Bookmarks 文件夹、Key 及 Existing Link 选项。
+- 保存上次使用的导出模式、匹配距离、Bookmarks 规则、Key 及 Existing Link 选项。
 
 ## 运行要求
 
@@ -45,7 +46,7 @@
 | 组件 | 用途 |
 | --- | --- |
 | Draw Tools | 使用顶点、区域或合并导出模式时必需 |
-| Bookmarks | 提供 Bookmarks 文件夹导出，并补充未加载的 Portal 数据 |
+| Bookmarks | 根据“包含”或“排除”规则处理全部收藏 Portal |
 | Live Inventory | 首选的 C.O.R.E. Key 数据源 |
 | Keys | C.O.R.E. Inventory 不可用时的手工库存回退数据源 |
 | C.O.R.E. 订阅 | 通过 Intel Inventory 接口自动读取真实库存时必需 |
@@ -74,7 +75,7 @@
 IITC → Toolbox → Maxfield Export
 ```
 
-导出窗口提供四种数据来源。
+导出窗口提供三种 Draw Tools 导出范围；Bookmarks 是否参与由两个独立勾选框明确控制。
 
 ### Draw Tools 顶点
 
@@ -88,10 +89,7 @@ IITC → Toolbox → Maxfield Export
 6. 检查是否存在未匹配顶点。
 7. 复制结果或下载 TXT。
 
-脚本会将每个 Draw Tools 顶点匹配到距离最近的 Portal。匹配候选包括：
-
-- IITC 当前已经加载的 Portal；
-- 所有 Bookmarks 文件夹中的 Portal。
+脚本会将每个 Draw Tools 顶点匹配到距离最近的 Portal。默认匹配候选仅包括 IITC 当前已经加载的 Portal。勾选“包含 Bookmarks”后，全部收藏 Portal 也会参与匹配并全部加入最终结果。
 
 建议在 Draw Tools 中启用 Portal 吸附，并尽量把端点准确放在 Portal 中心。圆形不提供顶点，只参与区域导出。
 
@@ -104,20 +102,20 @@ IITC → Toolbox → Maxfield Export
 3. 选择 **Draw Tools 区域内**。
 4. 点击 **重新生成**。
 
-区域候选数据来自：
-
-- IITC 当前已经加载的 Portal；
-- Bookmarks 中保存的 Portal。
-
-脚本不会主动向 Intel 批量请求区域内尚未加载的 Portal。因此，大范围导出前应分块移动地图并等待数据加载，或先把相关 Portal 加入 Bookmarks。
+区域候选数据默认只来自 IITC 当前已经加载的 Portal；勾选“包含 Bookmarks”后，全部收藏 Portal 也会参与区域判断，并且无论是否位于区域内都会加入最终导出结果。脚本不会主动向 Intel 批量请求区域内尚未加载的 Portal，因此大范围导出前应分块移动地图并等待数据加载。
 
 ### 顶点 + 区域（合并）
 
 此模式同时执行顶点匹配和区域筛选，然后按 Portal GUID 或坐标去重。适合在一个候选区域基础上，额外加入外围锚点或规划线端点。
 
-### Bookmarks 文件夹
+### Bookmarks 规则
 
-选择 **Bookmarks 文件夹** 后，可以直接导出某个 IITC Portal Bookmarks 文件夹中的全部 Portal，不需要 Draw Tools。
+- 仅勾选 **包含 Bookmarks**：在 Draw Tools 结果基础上加入所有文件夹中的全部收藏 Portal；
+- 仅勾选 **排除 Bookmarks**：从 Draw Tools 结果中移除所有已收藏 Portal；
+- 两项都不勾选：Bookmarks 完全不参与匹配、区域筛选或最终导出；
+- 两项同时勾选：属于非法操作，脚本会停止生成并清空旧输出。
+
+Bookmarks 规则作用于全部收藏文件夹，不再提供指定文件夹导出模式。
 
 ## 导出现有 Link
 
@@ -132,7 +130,7 @@ EXISTING_LINK; 0; 1
 ### 数据来源和操作流程
 
 1. 在 Intel 中移动和缩放地图，确保需要保留的 Portal 和 Link 已经加载并显示；
-2. 使用 Draw Tools 顶点或区域选择本次需要导出的 Portal，也可以选择 Bookmarks 文件夹；
+2. 使用 Draw Tools 顶点或区域选择本次需要导出的 Portal，并按需选择 Bookmarks 包含或排除规则；
 3. 打开 **Maxfield Export**；
 4. 勾选 **导出所选 Portal 间已加载的己方 Intel Link**；
 5. 点击 **重新生成**；
@@ -152,7 +150,7 @@ Draw Tools Polyline 即使连接了两个 Portal，也只影响顶点模式下�
 - Existing Link 的唯一数据源是 IITC 当前的 `window.links`；
 - Draw Tools Polyline、Polygon 边界、Circle 和 Marker 都不会直接生成 Link；
 - Link 的两个端点都必须已经被当前导出范围选中；
-- 顶点、区域和 Bookmarks 模式均可导出所选 Portal 之间的 Intel Link；
+- 顶点、区域和合并模式均可导出最终 Portal 集合之间的 Intel Link；
 - 只导出当前玩家阵营的 Link，已识别的敌方 Link 会忽略；
 - 尚未建立或当前地图尚未加载的 Link 不会导出；
 - 相同端点的重复线会按无向 Portal 对去重；
@@ -283,16 +281,15 @@ docker run --rm `
 - 确认当前页面是 `https://intel.ingress.com/`；
 - 确认 IITC-CE 已正常加载；
 - 刷新 Intel 页面；
-- 查看浏览器控制台是否出现 `Maxfield Portal Exporter v2.2.0 loaded`。
+- 查看浏览器控制台是否出现 `Maxfield Portal Exporter v2.3.0 loaded`。
 
 ### 提示 Draw Tools 未安装或尚未加载
 
-顶点、区域和合并模式依赖 Draw Tools。安装并启用 Draw Tools 后刷新 Intel，或改用 Bookmarks 文件夹模式。
+所有导出范围均依赖 Draw Tools。安装并启用 Draw Tools 后刷新 Intel；“包含 Bookmarks”是在 Draw Tools 结果上追加收藏 Portal，不是独立导出模式。
 
 ### Draw Tools 顶点没有匹配到 Portal
 
-- 放大地图并等待目标 Portal 加载；
-- 把目标 Portal 加入 Bookmarks；
+- 放大地图并等待目标 Portal 加载；若希望使用收藏数据补充匹配，则勾选“包含 Bookmarks”；
 - 确认顶点画在正确位置；
 - 适当增加匹配距离；
 - 不要把过大的匹配距离当作常规设置，以免匹配到错误 Portal。
@@ -301,7 +298,11 @@ docker run --rm `
 
 ### 区域内缺少 Portal
 
-区域模式不会批量获取未加载的 Intel 数据。请分块移动地图、等待 Portal 出现，或使用 Bookmarks 补充数据后重新生成。
+区域模式不会批量获取未加载的 Intel 数据。请分块移动地图并等待 Portal 出现；如需将全部收藏 Portal 一并加入结果，可勾选“包含 Bookmarks”。
+
+### 提示 Bookmarks 选项非法
+
+“包含 Bookmarks”和“排除 Bookmarks”不能同时启用。取消其中任意一项后重新生成；两项都不勾选表示本次导出完全忽略 Bookmarks。
 
 ### Intel 现有 Link 没有导出为 EXISTING_LINK
 
@@ -353,7 +354,7 @@ export PYTHONUTF8=1
 node --check iitc-maxfield-portal-exporter.user.js
 ```
 
-当前脚本版本：`2.2.0`。
+当前脚本版本：`2.3.0`。
 
 ## 开源许可
 

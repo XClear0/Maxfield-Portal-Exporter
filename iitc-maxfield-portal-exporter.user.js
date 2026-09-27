@@ -3,7 +3,7 @@
 // @id              iitc-maxfield-portal-exporter@openai-codex
 // @name            IITC plugin: Maxfield Portal Exporter
 // @category        Information
-// @version         2.2.0
+// @version         2.3.0
 // @license         MIT
 // @namespace       https://github.com/IITC-CE/ingress-intel-total-conversion
 // @description     Export Draw Tools/Bookmarks portals, loaded Intel links, and C.O.R.E. key counts to Maxfield.
@@ -25,7 +25,7 @@
 
     self.id = 'maxfield-portal-exporter';
     self.title = 'Maxfield Portal Exporter';
-    self.version = '2.2.0';
+    self.version = '2.3.0';
     self.CACHE_KEY = 'plugin-maxfield-portal-exporter-inventory-v2';
     self.SETTINGS_KEY = 'plugin-maxfield-portal-exporter-settings-v2';
     self.CACHE_TTL_MS = 10 * 60 * 1000;
@@ -71,16 +71,18 @@
       var defaults = {
         mode: 'vertices',
         matchDistance: self.DEFAULT_MATCH_DISTANCE,
-        bookmarkFolder: '',
+        includeBookmarks: false,
+        excludeBookmarks: false,
         includeKeys: true,
         includeExistingLinks: false
       };
       try {
         var stored = JSON.parse(localStorage.getItem(self.SETTINGS_KEY) || '{}');
         if (self.isObject(stored)) {
-          if (['vertices', 'areas', 'combined', 'bookmarks'].indexOf(stored.mode) !== -1) defaults.mode = stored.mode;
+          if (['vertices', 'areas', 'combined'].indexOf(stored.mode) !== -1) defaults.mode = stored.mode;
           if (Number(stored.matchDistance) > 0) defaults.matchDistance = Number(stored.matchDistance);
-          if (typeof stored.bookmarkFolder === 'string') defaults.bookmarkFolder = stored.bookmarkFolder;
+          if (typeof stored.includeBookmarks === 'boolean') defaults.includeBookmarks = stored.includeBookmarks;
+          if (typeof stored.excludeBookmarks === 'boolean') defaults.excludeBookmarks = stored.excludeBookmarks;
           if (typeof stored.includeKeys === 'boolean') defaults.includeKeys = stored.includeKeys;
           if (typeof stored.includeExistingLinks === 'boolean') defaults.includeExistingLinks = stored.includeExistingLinks;
         }
@@ -95,13 +97,15 @@
       if (!root) return;
       var mode = root.querySelector('#mpe-mode');
       var distance = root.querySelector('#mpe-distance');
-      var folder = root.querySelector('#mpe-bookmark-folder');
+      var includeBookmarks = root.querySelector('#mpe-include-bookmarks');
+      var excludeBookmarks = root.querySelector('#mpe-exclude-bookmarks');
       var includeKeys = root.querySelector('#mpe-include-keys');
       var includeExistingLinks = root.querySelector('#mpe-include-existing-links');
       var data = {
         mode: mode ? mode.value : 'vertices',
         matchDistance: distance && Number(distance.value) > 0 ? Number(distance.value) : self.DEFAULT_MATCH_DISTANCE,
-        bookmarkFolder: folder ? folder.value : '',
+        includeBookmarks: includeBookmarks ? includeBookmarks.checked : false,
+        excludeBookmarks: excludeBookmarks ? excludeBookmarks.checked : false,
         includeKeys: includeKeys ? includeKeys.checked : true,
         includeExistingLinks: includeExistingLinks ? includeExistingLinks.checked : false
       };
@@ -362,9 +366,13 @@
     // Portal and Draw Tools data
     // ------------------------------------------------------------------------
 
+    self.portalCoordinateIdentity = function (portal) {
+      return 'p:' + Number(portal.lat).toFixed(6) + ',' + Number(portal.lng).toFixed(6);
+    };
+
     self.portalIdentity = function (portal) {
       if (portal.guid) return 'g:' + portal.guid;
-      return 'p:' + Number(portal.lat).toFixed(6) + ',' + Number(portal.lng).toFixed(6);
+      return self.portalCoordinateIdentity(portal);
     };
 
     self.getLoadedPortals = function () {
@@ -400,25 +408,12 @@
       return null;
     };
 
-    self.getBookmarkFolders = function () {
-      var object = self.getBookmarkObject();
-      var folders = [];
-      if (!object) return folders;
-      Object.keys(object.portals).forEach(function (id) {
-        var folder = object.portals[id];
-        if (!folder || !self.isObject(folder.bkmrk)) return;
-        folders.push({ id: id, label: folder.label || id, count: Object.keys(folder.bkmrk).length });
-      });
-      return folders;
-    };
-
-    self.getBookmarkPortals = function (folderId) {
+    self.getBookmarkPortals = function () {
       var object = self.getBookmarkObject();
       var result = [];
       if (!object) return result;
 
       Object.keys(object.portals).forEach(function (id) {
-        if (folderId && id !== folderId) return;
         var folder = object.portals[id];
         if (!folder || !self.isObject(folder.bkmrk)) return;
         Object.keys(folder.bkmrk).forEach(function (bookmarkId) {
@@ -458,8 +453,24 @@
       return order.map(function (id) { return map[id]; });
     };
 
-    self.getPortalCandidates = function () {
-      return self.mergePortals([self.getLoadedPortals(), self.getBookmarkPortals('')]);
+    self.getPortalCandidates = function (includeBookmarks, bookmarkPortals) {
+      var lists = [self.getLoadedPortals()];
+      if (includeBookmarks) lists.push(bookmarkPortals || self.getBookmarkPortals());
+      return self.mergePortals(lists);
+    };
+
+    self.excludeBookmarkPortals = function (portals, bookmarkPortals) {
+      var bookmarkedGuids = {};
+      var bookmarkedCoordinates = {};
+      bookmarkPortals.forEach(function (portal) {
+        if (portal.guid) bookmarkedGuids[portal.guid] = true;
+        bookmarkedCoordinates[self.portalCoordinateIdentity(portal)] = true;
+      });
+      return portals.filter(function (portal) {
+        var matchesGuid = portal.guid && bookmarkedGuids[portal.guid];
+        var matchesCoordinates = bookmarkedCoordinates[self.portalCoordinateIdentity(portal)];
+        return !matchesGuid && !matchesCoordinates;
+      });
     };
 
     self.isLatLng = function (value) {
@@ -665,12 +676,21 @@
       return { portals: self.mergePortals([matched]), unmatched: unmatched };
     };
 
-    self.collectSelection = function (mode, maxDistance, folderId, includeExistingLinks) {
+    self.collectSelection = function (mode, maxDistance, includeBookmarks, excludeBookmarks, includeExistingLinks) {
+      if (includeBookmarks && excludeBookmarks) {
+        throw new Error('非法操作：不能同时勾选“包含 Bookmarks”和“排除 Bookmarks”。');
+      }
+
       var result = {
         portals: [],
         unmatched: [],
         vertexCount: 0,
         areaCount: 0,
+        bookmarkTotal: 0,
+        bookmarksAdded: 0,
+        bookmarksExcluded: 0,
+        includeBookmarks: includeBookmarks,
+        excludeBookmarks: excludeBookmarks,
         existingLinks: [],
         includeExistingLinks: includeExistingLinks,
         loadedIntelLinks: 0,
@@ -680,36 +700,46 @@
         notes: []
       };
 
-      if (mode === 'bookmarks') {
-        if (!folderId) throw new Error('请选择一个 Bookmarks 文件夹');
-        result.portals = self.mergePortals([self.getBookmarkPortals(folderId)]);
-      } else {
-        var layers = self.getDrawLayers();
-        if (!layers.length) throw new Error('Draw Tools 中没有图形');
-        var candidates = self.getPortalCandidates();
+      var layers = self.getDrawLayers();
+      if (!layers.length) throw new Error('Draw Tools 中没有图形');
+      var bookmarkPortals = includeBookmarks || excludeBookmarks
+        ? self.mergePortals([self.getBookmarkPortals()])
+        : [];
+      var candidates = self.getPortalCandidates(includeBookmarks, bookmarkPortals);
 
-        if (mode === 'vertices' || mode === 'combined') {
-          var vertices = self.getDrawVertices(layers);
-          var vertexMatches = self.matchVertices(vertices, candidates, maxDistance);
-          result.vertexCount = vertices.length;
-          result.portals = result.portals.concat(vertexMatches.portals);
-          result.unmatched = vertexMatches.unmatched;
-          if (!vertices.length) result.notes.push('没有找到可匹配的线段、图形顶点或 Marker。圆形只参与区域导出。');
-        }
+      if (mode === 'vertices' || mode === 'combined') {
+        var vertices = self.getDrawVertices(layers);
+        var vertexMatches = self.matchVertices(vertices, candidates, maxDistance);
+        result.vertexCount = vertices.length;
+        result.portals = result.portals.concat(vertexMatches.portals);
+        result.unmatched = vertexMatches.unmatched;
+        if (!vertices.length) result.notes.push('没有找到可匹配的线段、图形顶点或 Marker。圆形只参与区域导出。');
+      }
 
-        if (mode === 'areas' || mode === 'combined') {
-          var areas = self.getAreaLayers(layers);
-          result.areaCount = areas.length;
-          var inside = candidates.filter(function (portal) {
-            return areas.some(function (layer) { return self.portalInsideLayer(portal, layer); });
-          });
-          result.portals = result.portals.concat(inside);
-          result.notes.push('区域结果仅包含 IITC 当前已加载的 Portal 与 Bookmarks；请先移动/缩放地图以加载完整数据。');
-          if (!areas.length) result.notes.push('Draw Tools 中没有多边形、矩形或圆形区域。');
-        }
+      if (mode === 'areas' || mode === 'combined') {
+        var areas = self.getAreaLayers(layers);
+        result.areaCount = areas.length;
+        var inside = candidates.filter(function (portal) {
+          return areas.some(function (layer) { return self.portalInsideLayer(portal, layer); });
+        });
+        result.portals = result.portals.concat(inside);
+        result.notes.push('区域结果仅包含 IITC 当前已加载的 Portal' + (includeBookmarks ? '及全部 Bookmarks' : '') + '；请先移动/缩放地图以加载完整数据。');
+        if (!areas.length) result.notes.push('Draw Tools 中没有多边形、矩形或圆形区域。');
       }
 
       result.portals = self.mergePortals([result.portals]);
+
+      if (includeBookmarks || excludeBookmarks) {
+        result.bookmarkTotal = bookmarkPortals.length;
+        var portalCountBeforeBookmarks = result.portals.length;
+        if (includeBookmarks) {
+          result.portals = self.mergePortals([result.portals, bookmarkPortals]);
+          result.bookmarksAdded = result.portals.length - portalCountBeforeBookmarks;
+        } else {
+          result.portals = self.excludeBookmarkPortals(result.portals, bookmarkPortals);
+          result.bookmarksExcluded = portalCountBeforeBookmarks - result.portals.length;
+        }
+      }
 
       if (includeExistingLinks) {
         var existing = self.collectExistingIntelLinks(result.portals);
@@ -792,7 +822,8 @@
       return {
         mode: root.querySelector('#mpe-mode').value,
         maxDistance: Number.isFinite(distance) && distance > 0 ? distance : self.DEFAULT_MATCH_DISTANCE,
-        folderId: root.querySelector('#mpe-bookmark-folder').value,
+        includeBookmarks: root.querySelector('#mpe-include-bookmarks').checked,
+        excludeBookmarks: root.querySelector('#mpe-exclude-bookmarks').checked,
         includeKeys: root.querySelector('#mpe-include-keys').checked,
         includeExistingLinks: root.querySelector('#mpe-include-existing-links').checked
       };
@@ -805,6 +836,13 @@
       parts.push('<strong>已生成 ' + selection.portals.length + ' 个 Portal。</strong>');
       if (selection.vertexCount) parts.push('Draw Tools 顶点：' + selection.vertexCount + '。');
       if (selection.areaCount) parts.push('区域图形：' + selection.areaCount + '。');
+      if (selection.includeBookmarks) {
+        parts.push('Bookmarks：共 ' + selection.bookmarkTotal + ' 个；新增导出 ' + selection.bookmarksAdded + ' 个。');
+      } else if (selection.excludeBookmarks) {
+        parts.push('Bookmarks：共 ' + selection.bookmarkTotal + ' 个；从导出结果排除 ' + selection.bookmarksExcluded + ' 个。');
+      } else {
+        parts.push('Bookmarks：未参与本次导出。');
+      }
       if (selection.includeExistingLinks) {
         parts.push('Intel 已加载 Link：' + selection.loadedIntelLinks + '；所选 Portal 间 Intel Link：' + selection.selectedIntelLinkPairs + '；已导出己方 EXISTING_LINK：' + selection.existingLinks.length + '。');
       }
@@ -835,7 +873,8 @@
         var selection = self.collectSelection(
           values.mode,
           values.maxDistance,
-          values.folderId,
+          values.includeBookmarks,
+          values.excludeBookmarks,
           values.includeExistingLinks
         );
         var issueCount = selection.unmatched.length;
@@ -882,6 +921,8 @@
       } catch (error) {
         var status = document.getElementById('mpe-result-status');
         if (status) status.innerHTML = '<span class="mpe-error">' + self.escapeHtml(error.message) + '</span>';
+        var textarea = document.getElementById('mpe-output');
+        if (textarea) textarea.value = '';
         self.lastResult = null;
         return false;
       }
@@ -952,23 +993,10 @@
       var mode = root.querySelector('#mpe-mode').value;
       root.querySelector('#mpe-distance-wrap').style.display =
         (mode === 'vertices' || mode === 'combined') ? '' : 'none';
-      root.querySelector('#mpe-bookmark-wrap').style.display = mode === 'bookmarks' ? '' : 'none';
-    };
-
-    self.buildFolderOptions = function (selected) {
-      var folders = self.getBookmarkFolders();
-      if (!folders.length) return '<option value="">未找到 Bookmarks 文件夹</option>';
-      return folders.map(function (folder) {
-        var isSelected = selected === folder.id ? ' selected' : '';
-        return '<option value="' + self.escapeHtml(folder.id) + '"' + isSelected + '>' +
-          self.escapeHtml(folder.label) + ' (' + folder.count + ')</option>';
-      }).join('');
     };
 
     self.openDialog = function () {
       var settings = self.loadSettings();
-      var folders = self.getBookmarkFolders();
-      if (!settings.bookmarkFolder && folders.length) settings.bookmarkFolder = folders[0].id;
 
       var html = '' +
         '<div id="' + self.id + '-root" class="mpe-root">' +
@@ -977,10 +1005,10 @@
               '<option value="vertices"' + (settings.mode === 'vertices' ? ' selected' : '') + '>Draw Tools 顶点</option>' +
               '<option value="areas"' + (settings.mode === 'areas' ? ' selected' : '') + '>Draw Tools 区域内</option>' +
               '<option value="combined"' + (settings.mode === 'combined' ? ' selected' : '') + '>顶点 + 区域（合并）</option>' +
-              '<option value="bookmarks"' + (settings.mode === 'bookmarks' ? ' selected' : '') + '>Bookmarks 文件夹</option>' +
             '</select></label>' +
             '<label id="mpe-distance-wrap">Portal 匹配距离（米）<input id="mpe-distance" type="number" min="1" step="1" value="' + self.escapeHtml(settings.matchDistance) + '"></label>' +
-            '<label id="mpe-bookmark-wrap">Bookmarks 文件夹<select id="mpe-bookmark-folder">' + self.buildFolderOptions(settings.bookmarkFolder) + '</select></label>' +
+            '<label class="mpe-checkbox"><input id="mpe-include-bookmarks" type="checkbox"' + (settings.includeBookmarks ? ' checked' : '') + '>包含 Bookmarks</label>' +
+            '<label class="mpe-checkbox"><input id="mpe-exclude-bookmarks" type="checkbox"' + (settings.excludeBookmarks ? ' checked' : '') + '>排除 Bookmarks</label>' +
             '<label class="mpe-checkbox"><input id="mpe-include-keys" type="checkbox"' + (settings.includeKeys ? ' checked' : '') + '>包含已有 Key 数量</label>' +
             '<label class="mpe-checkbox"><input id="mpe-include-existing-links" type="checkbox"' + (settings.includeExistingLinks ? ' checked' : '') + '>导出所选 Portal 间已加载的己方 Intel Link</label>' +
           '</div>' +
@@ -999,6 +1027,7 @@
             '</div>' +
             '<div id="mpe-inventory-message" class="mpe-message"></div>' +
           '</fieldset>' +
+          '<p class="mpe-help">Bookmarks 规则：仅勾选“包含”会加入全部收藏 Portal；仅勾选“排除”会移除全部收藏 Portal；两项都不勾选则完全忽略 Bookmarks；两项同时勾选属于非法操作并停止导出。</p>' +
           '<p class="mpe-help">EXISTING_LINK 的唯一数据源是 Intel window.links。Draw Tools 只选择 Portal 或区域，绘制的 Polyline 不会直接作为 Link 导出；只有两端都在所选 Portal 中、当前已加载且属于己方的真实 Intel Link 才会输出。</p>' +
           '<p class="mpe-help">钥匙优先级：Live Inventory → 本插件有效的 C.O.R.E. 缓存 → IITC Keys → 0。普通背包与 Capsule/Key Locker 中同一 Portal 的 Key 会合并统计。</p>' +
         '</div>';
@@ -1015,7 +1044,16 @@
         self.updateModeControls();
         self.regenerate(false);
       });
-      root.querySelector('#mpe-bookmark-folder').addEventListener('change', function () { self.regenerate(false); });
+      var bookmarkRuleChanged = function () {
+        var includeBookmarks = root.querySelector('#mpe-include-bookmarks').checked;
+        var excludeBookmarks = root.querySelector('#mpe-exclude-bookmarks').checked;
+        if (includeBookmarks && excludeBookmarks) {
+          window.alert('非法操作：不能同时勾选“包含 Bookmarks”和“排除 Bookmarks”。');
+        }
+        self.regenerate(false);
+      };
+      root.querySelector('#mpe-include-bookmarks').addEventListener('change', bookmarkRuleChanged);
+      root.querySelector('#mpe-exclude-bookmarks').addEventListener('change', bookmarkRuleChanged);
       root.querySelector('#mpe-include-keys').addEventListener('change', function () { self.regenerate(false); });
       root.querySelector('#mpe-include-existing-links').addEventListener('change', function () { self.regenerate(false); });
       root.querySelector('#mpe-regenerate').addEventListener('click', function () { self.regenerate(true); });
@@ -1083,13 +1121,13 @@
         window.IITC.toolbox.addButton({
           id: 'toolbox-maxfield-portal-exporter',
           label: 'Maxfield Export',
-          title: 'Export Draw Tools or Bookmarks portals for Maxfield',
+          title: 'Export Draw Tools portals for Maxfield with optional Bookmarks rules',
           action: self.openDialog
         });
       } else {
         var link = document.createElement('a');
         link.textContent = 'Maxfield Export';
-        link.title = 'Export Draw Tools or Bookmarks portals for Maxfield';
+        link.title = 'Export Draw Tools portals for Maxfield with optional Bookmarks rules';
         link.href = '#';
         link.addEventListener('click', function (event) {
           event.preventDefault();
